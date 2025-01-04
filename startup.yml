@@ -1,0 +1,168 @@
+- name: VPS setup.
+  hosts: vps
+  tasks:
+    - name: Check version 
+      ansible.builtin.setup:
+        filter: ansible_distribution_version
+      register: rhel_version
+
+    - name: Check if tailscale repo added.
+      ansible.builtin.stat:
+        path: /etc/yum.repos.d/tailscale.repo
+      register: tailscale_repo_added
+
+    - name: add tailscale repo.
+      become: true
+      community.general.dnf_config_manager:
+        name: https://pkgs.tailscale.com/stable/rhel/9/tailscale.repo
+        state: enabled
+      when: 
+        - not tailscale_repo_added.stat.exists
+        - rhel_version.ansible_facts.ansible_distribution_version is version('9', '=')
+
+    - name: add tailscale repo.
+      become: true
+      community.general.dnf_config_manager:
+        name: https://pkgs.tailscale.com/stable/rhel/8/tailscale.repo
+        state: enabled
+      when:
+        - not tailscale_repo_added.stat.exists
+        - rhel_version.ansible_facts.ansible_distribution_version is version('8', '=')
+
+    - name: install updates
+      become: true
+      ansible.builtin.dnf:
+        update_cache: true
+    
+    - name: install tailscale
+      become: true
+      ansible.builtin.dnf:
+        name: tailscale
+        state: present
+    - name: enable tailscale
+      become: true
+      ansible.builtin.systemd_service:
+        name: tailscaled
+        state: started
+        enabled: true
+    
+    - name: install firewall
+      become: true
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+    - name: enable firewalld
+      become: true
+      ansible.builtin.systemd_service:
+        name: firewalld
+        state: started
+        enabled: true
+       
+    
+    - name: Check tailscale status
+      ansible.builtin.command: tailscale status --json
+      changed_when: false
+      register: tailscale_status
+
+    - name: Parse status JSON
+      ansible.builtin.set_fact:
+        tailscale_is_online: "{{ (tailscale_status.stdout | from_json).Self.Online }}"
+
+    - name: check interfaces
+      ansible.builtin.setup:
+        gather_subset:
+          - network
+      register: found_interfaces
+
+    - name: get tailscale interface
+      ansible.builtin.set_fact:
+        tailscale_interface: "{{ item }}"
+      with_items: "{{ found_interfaces['ansible_facts']['ansible_interfaces'] }}"
+      when: item.startswith('tailscale')
+    - name: get internal interface
+      ansible.builtin.set_fact:
+        subnet_interface: "{{ item }}"
+      with_items: "{{ found_interfaces['ansible_facts']['ansible_interfaces'] }}"
+      when:
+        - "'ipv4' in found_interfaces['ansible_facts']['ansible_' + item]"
+        - found_interfaces['ansible_facts']['ansible_' + item]['ipv4']['address'] is defined
+        - found_interfaces['ansible_facts']['ansible_' + item]['ipv4_secondaries'] is not defined
+        - found_interfaces['ansible_facts']['ansible_' + item]['ipv4']['address'] | ansible.utils.ipaddr('10.0.0.0/8')
+
+# Remove interface from firewall.
+    - name: Check internal interface exists
+      ansible.builtin.assert:
+        that:
+          - subnet_interface is defined
+        fail_msg: "Expected subnet_interface to be defined"
+    - name: remove interfaces from public
+      become: true
+      ansible.posix.firewalld:
+        zone: public
+        interface: "{{ subnet_interface }}"
+        permanent: true
+        state: disabled
+      notify: Reload firewalld
+
+    - name: Check tailscale interface exists
+      ansible.builtin.assert:
+        that:
+          - tailscale_interface is defined
+        fail_msg: "Expected tailscale_interface to be defined"
+    - name: add tailscale to internal interfaces
+      become: true
+      ansible.posix.firewalld:
+        zone: internal
+        interface: "{{ tailscale_interface }}"
+        permanent: true
+        state: enabled
+      notify: Reload firewalld
+    - name: add subnet to internal interfaces
+      become: true
+      ansible.posix.firewalld:
+        zone: internal
+        interface: "{{ subnet_interface }}"
+        permanent: true
+        state: enabled
+      notify: Reload firewalld
+      
+    
+
+    - name: Check tailscale_auth_key exists
+      ansible.builtin.assert:
+        that:
+          - tailscale_auth_key is defined
+        fail_msg: "The required variable 'tailscale_auth_key' is not defined."
+      when:
+        - not tailscale_is_online
+    - name: authenticate tailscale
+      become: true
+      ansible.builtin.command:
+        cmd: tailscale up --auth-key={{ tailscale_auth_key }}
+      when:
+        - not tailscale_is_online
+
+    - name: remove ssh from public zone.
+      become: true
+      ansible.posix.firewalld:
+        zone: public
+        service: ssh
+        permanent: true
+        state: disabled
+      notify: Reload firewalld
+    - name: remove ssh from public zone.
+      become: true
+      ansible.posix.firewalld:
+        zone: public
+        service: cockpit
+        permanent: true
+        state: disabled
+      notify: Reload firewalld
+      
+  handlers:
+    - name: Reload firewalld
+      become: true
+      ansible.builtin.service:
+        name: firewalld
+        state: reloaded
+      
