@@ -124,9 +124,8 @@
         interface: "{{ subnet_interface }}"
         permanent: true
         state: enabled
-      notify: Reload firewalld
-      
-    
+      notify: Reload firewalld  
+
 
     - name: Check tailscale_auth_key exists
       ansible.builtin.assert:

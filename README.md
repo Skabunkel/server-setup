@@ -4,6 +4,8 @@ Create an inventory.ini file
 ```
 [vps]
 <VPS address>
+[do_tailnet]
+<tailscale address>
 ```
 
 ```

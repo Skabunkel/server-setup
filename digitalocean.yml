@@ -1,0 +1,19 @@
+- name: digitalocean specific stuff.
+  hosts: do_tailnet
+  tasks:
+    - name: add firewall for digitalocean web console
+      ansible.posix.firewalld:
+        source: 198.211.96.0/20
+        zone: internal
+        state: enabled
+        permanent: true
+      notify: Reload firewalld
+
+
+  handlers:
+    - name: Reload firewalld
+      become: true
+      ansible.builtin.service:
+        name: firewalld
+        state: reloaded
+      
